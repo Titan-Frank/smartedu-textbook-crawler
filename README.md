@@ -121,6 +121,7 @@ node scripts/smartedu_textbook_batch.js \
 每次运行会在输出目录生成：
 
 - 下载好的 PDF 文件
+- 文件名默认包含关键标签：`序号_学段_学科_版本_年级_册次_标题_ID.pdf`
 - `manifest.json`：记录每本教材的下载结果、详情页地址、输出路径、失败原因等
 
 ## 查看帮助

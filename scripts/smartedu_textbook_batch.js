@@ -201,6 +201,36 @@ function sanitizeFilename(value) {
     .replace(/^_+|_+$/g, '');
 }
 
+function uniqueNonEmpty(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    if (!value) {
+      continue;
+    }
+    if (seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    result.push(value);
+  }
+  return result;
+}
+
+function buildOutputFilename(item, seq) {
+  const parts = uniqueNonEmpty([
+    String(seq).padStart(2, '0'),
+    item.stage,
+    item.subject,
+    item.publisherTag,
+    item.grade,
+    item.volumeTag,
+    item.title,
+    item.id,
+  ]);
+  return `${sanitizeFilename(parts.join('_'))}.pdf`;
+}
+
 function buildDetailUrl(itemId) {
   return `https://basic.smartedu.cn/tchMaterial/detail?contentType=assets_document&contentId=${itemId}&catalogType=tchMaterial&subCatalog=tchMaterial`;
 }
@@ -274,6 +304,11 @@ async function collectMatchedItems(options) {
         title: item.title,
         tags: (item.tag_list || []).map((tag) => tag.tag_name),
         provider: item.provider_list?.[0]?.name || '',
+        stage: (item.tag_list || []).find((tag) => tag.tag_dimension_id === 'zxxxd')?.tag_name || '',
+        subject: (item.tag_list || []).find((tag) => tag.tag_dimension_id === 'zxxxk')?.tag_name || '',
+        publisherTag: (item.tag_list || []).find((tag) => tag.tag_dimension_id === 'zxxbb')?.tag_name || '',
+        grade: (item.tag_list || []).find((tag) => tag.tag_dimension_id === 'zxxnj')?.tag_name || '',
+        volumeTag: (item.tag_list || []).find((tag) => tag.tag_dimension_id === 'zxxcc')?.tag_name || '',
       });
     }
   }
@@ -319,7 +354,7 @@ async function promptForLogin(prompt, page) {
 
 async function downloadOneBook({ page, item, seq, outputDir, force, prompt }) {
   const detailUrl = buildDetailUrl(item.id);
-  const filename = `${String(seq).padStart(2, '0')}_${sanitizeFilename(item.title)}_${item.id}.pdf`;
+  const filename = buildOutputFilename(item, seq);
   const outputPath = path.join(outputDir, filename);
 
   if (!force && fs.existsSync(outputPath)) {
