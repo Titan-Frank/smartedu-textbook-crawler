@@ -387,8 +387,16 @@ async function saveManifest(outputDir, manifest) {
 }
 
 async function launchBrowserContext(chromium, options) {
+  const noDisplay =
+    process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
+  const effectiveHeadless = options.headless || noDisplay;
+
+  if (noDisplay && !options.headless) {
+    console.warn('No graphical session detected, falling back to headless mode.');
+  }
+
   const launchOptions = {
-    headless: options.headless,
+    headless: effectiveHeadless,
     acceptDownloads: true,
     viewport: { width: 1440, height: 960 },
   };
@@ -408,8 +416,13 @@ async function launchBrowserContext(chromium, options) {
   try {
     return await chromium.launchPersistentContext(options.userDataDir, launchOptions);
   } catch (error) {
+    const detail = String(error && error.message ? error.message : error);
     throw new Error(
-      "Unable to launch local Chrome or Playwright Chromium. Install Chrome, or run: npx playwright install chromium",
+      `Unable to launch local Chrome or Playwright Chromium. ${
+        noDisplay
+          ? 'No graphical session is available and headless fallback also failed.'
+          : 'Install Chrome, or run: npx playwright install chromium'
+      } Detail: ${detail}`,
     );
   }
 }
