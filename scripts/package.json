@@ -1,0 +1,8 @@
+{
+  "scripts": {
+    "crawl-ui": "node server.js"
+  },
+  "dependencies": {
+    "playwright": "^1.58.2"
+  }
+}

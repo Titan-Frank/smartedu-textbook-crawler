@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SmartEdu Textbook Crawler</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="hero">
+        <h1>SmartEdu Textbook Crawler</h1>
+        <p>填写筛选参数后，在本机浏览器中启动教材批量下载。</p>
+      </header>
+
+      <section class="card">
+        <form id="crawl-form" class="form">
+          <div class="row">
+            <label class="checkbox">
+              <input id="allElectronic" name="allElectronic" type="checkbox" checked />
+              <span>抓取全站所有电子教材</span>
+            </label>
+          </div>
+
+          <label>
+            <span>筛选页 URL</span>
+            <input id="url" name="url" type="url" placeholder="https://basic.smartedu.cn/tchMaterial?defaultTag=..." />
+          </label>
+
+          <div class="grid two">
+            <label>
+              <span>学段</span>
+              <input id="stage" name="stage" type="text" placeholder="小学 / 初中 / 高中" />
+            </label>
+            <label>
+              <span>学科</span>
+              <input id="subject" name="subject" type="text" placeholder="数学 / 语文" />
+            </label>
+            <label>
+              <span>版本</span>
+              <input id="publisher" name="publisher" type="text" placeholder="沪教版 / 统编版" />
+            </label>
+            <label>
+              <span>年级</span>
+              <input id="grade" name="grade" type="text" placeholder="一年级 / 高中年级" />
+            </label>
+            <label>
+              <span>册次</span>
+              <input id="volume" name="volume" type="text" placeholder="上册 / 必修 第一册" />
+            </label>
+            <label>
+              <span>关键词</span>
+              <input id="keyword" name="keyword" type="text" placeholder="标题或出版社关键词" />
+            </label>
+          </div>
+
+          <div class="grid two">
+            <label>
+              <span>输出目录</span>
+              <input id="outputDir" name="outputDir" type="text" placeholder="/absolute/path/to/downloads" />
+            </label>
+            <label>
+              <span>浏览器配置目录</span>
+              <input id="userDataDir" name="userDataDir" type="text" placeholder="/absolute/path/to/profile" />
+            </label>
+            <label>
+              <span>限制下载数量</span>
+              <input id="limit" name="limit" type="number" min="0" placeholder="0 表示不限" />
+            </label>
+          </div>
+
+          <label>
+            <span>额外标签</span>
+            <textarea id="tags" name="tags" rows="4" placeholder="每行一个标签名，例如：&#10;电子教材&#10;数学"></textarea>
+          </label>
+
+          <div class="row">
+            <label class="checkbox">
+              <input id="headless" name="headless" type="checkbox" />
+              <span>无头运行</span>
+            </label>
+            <label class="checkbox">
+              <input id="force" name="force" type="checkbox" />
+              <span>强制重下</span>
+            </label>
+          </div>
+
+          <div class="actions">
+            <button id="startBtn" type="submit">开始爬取</button>
+            <button id="stopBtn" type="button" class="secondary">停止任务</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card status-card">
+        <div class="status-header">
+          <h2>任务状态</h2>
+          <span id="jobStatus" class="pill">空闲</span>
+        </div>
+        <p id="jobMeta" class="muted">尚未启动任务。</p>
+        <pre id="logOutput" class="logs"></pre>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+  </html>
