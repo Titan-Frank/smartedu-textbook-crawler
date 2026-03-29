@@ -96,6 +96,7 @@ function collectFormPayload() {
     outputDir: formData.get('outputDir'),
     userDataDir: formData.get('userDataDir'),
     limit: Number(formData.get('limit') || 0),
+    concurrency: Number(formData.get('concurrency') || 1),
     headless: formData.get('headless') === 'on',
     force: formData.get('force') === 'on',
     tags: formData

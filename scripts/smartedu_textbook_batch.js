@@ -23,6 +23,14 @@ function normalizeCliUrl(value) {
     .trim();
 }
 
+function parseIntegerOption(rawValue, flag, { min = 0 } = {}) {
+  const value = Number.parseInt(String(rawValue || ''), 10);
+  if (!Number.isFinite(value) || Number.isNaN(value) || value < min) {
+    throw new Error(`${flag} must be an integer greater than or equal to ${min}`);
+  }
+  return value;
+}
+
 function parseArgs(argv) {
   const options = {
     url: '',
@@ -32,6 +40,7 @@ function parseArgs(argv) {
     headless: false,
     force: false,
     limit: 0,
+    concurrency: 1,
     tags: [],
     keyword: '',
   };
@@ -56,7 +65,10 @@ function parseArgs(argv) {
     } else if (arg === '--force') {
       options.force = true;
     } else if (arg === '--limit') {
-      options.limit = Number(argv[index + 1] || '0');
+      options.limit = parseIntegerOption(argv[index + 1], '--limit', { min: 0 });
+      index += 1;
+    } else if (arg === '--concurrency') {
+      options.concurrency = parseIntegerOption(argv[index + 1], '--concurrency', { min: 1 });
       index += 1;
     } else if (arg === '--tag') {
       const value = argv[index + 1] || '';
@@ -141,6 +153,7 @@ Options:
   --headless              Run Chromium in headless mode
   --force                 Re-download files even if they already exist
   --limit <n>             Download only the first n matched textbooks
+  --concurrency <n>       Number of textbooks to download in parallel
   --tag <name>            Extra tag-name filter, repeatable
   --stage <name>          Convenience tag filter, e.g. 小学/初中/高中
   --subject <name>        Convenience tag filter, e.g. 数学/语文
@@ -432,7 +445,26 @@ async function promptForLogin(prompt, page) {
   );
 }
 
-async function downloadOneBook({ page, item, seq, outputDir, force, prompt }) {
+function createLoginCoordinator(prompt) {
+  let currentLoginPromise = null;
+
+  return async function ensureLoggedIn(page) {
+    if (currentLoginPromise) {
+      console.log('检测到已有页面正在等待登录完成，复用这次登录状态...');
+      await currentLoginPromise;
+      return;
+    }
+
+    currentLoginPromise = promptForLogin(prompt, page);
+    try {
+      await currentLoginPromise;
+    } finally {
+      currentLoginPromise = null;
+    }
+  };
+}
+
+async function downloadOneBook({ page, item, seq, outputDir, force, ensureLoggedIn }) {
   const detailUrl = buildDetailUrl(item.id);
   const filename = buildOutputFilename(item, seq);
   const outputPath = path.join(outputDir, filename);
@@ -452,7 +484,8 @@ async function downloadOneBook({ page, item, seq, outputDir, force, prompt }) {
 
   let frame = await waitForPdfFrame(page, 15000);
   if (!frame) {
-    await promptForLogin(prompt, page);
+    await ensureLoggedIn(page);
+    await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
     frame = await waitForPdfFrame(page, 120000);
   }
   if (!frame) {
@@ -493,6 +526,69 @@ async function downloadOneBook({ page, item, seq, outputDir, force, prompt }) {
     bytes: stats.size,
     pages,
   };
+}
+
+async function createWorkerPages(context, workerCount) {
+  const pages = [];
+  const initialPage = context.pages()[0] || (await context.newPage());
+  pages.push(initialPage);
+
+  while (pages.length < workerCount) {
+    pages.push(await context.newPage());
+  }
+
+  return pages;
+}
+
+async function downloadWithWorkers({ context, items, options, prompt }) {
+  const workerCount = Math.min(options.concurrency, items.length);
+  const pages = await createWorkerPages(context, workerCount);
+  const manifest = new Array(items.length);
+  const ensureLoggedIn = createLoginCoordinator(prompt);
+  let nextIndex = 0;
+
+  await Promise.all(
+    pages.map(async (page, workerIndex) => {
+      const workerLabel = `worker ${workerIndex + 1}/${workerCount}`;
+
+      while (true) {
+        const itemIndex = nextIndex;
+        nextIndex += 1;
+        if (itemIndex >= items.length) {
+          return;
+        }
+
+        const item = items[itemIndex];
+        console.log(`\n[${itemIndex + 1}/${items.length}] [${workerLabel}] ${item.title}`);
+
+        try {
+          const result = await downloadOneBook({
+            page,
+            item,
+            seq: itemIndex + 1,
+            outputDir: options.outputDir,
+            force: options.force,
+            ensureLoggedIn,
+          });
+          manifest[itemIndex] = result;
+          console.log(`[${workerLabel}] Saved: ${result.outputPath}`);
+        } catch (error) {
+          const failure = {
+            status: 'failed',
+            id: item.id,
+            title: item.title,
+            detailUrl: buildDetailUrl(item.id),
+            error: error.message,
+          };
+          manifest[itemIndex] = failure;
+          console.error(`[${workerLabel}] Failed: ${item.title}`);
+          console.error(error.message);
+        }
+      }
+    }),
+  );
+
+  return manifest;
 }
 
 async function saveManifest(outputDir, manifest) {
@@ -572,38 +668,16 @@ async function main() {
 
   const context = await launchBrowserContext(chromium, options);
   activeContext = context;
-
-  const page = context.pages()[0] || (await context.newPage());
-  const manifest = [];
+  let manifest = [];
 
   try {
-    for (let index = 0; index < limitedItems.length; index += 1) {
-      const item = limitedItems[index];
-      console.log(`\n[${index + 1}/${limitedItems.length}] ${item.title}`);
-      try {
-        const result = await downloadOneBook({
-          page,
-          item,
-          seq: index + 1,
-          outputDir: options.outputDir,
-          force: options.force,
-          prompt,
-        });
-        manifest.push(result);
-        console.log(`Saved: ${result.outputPath}`);
-      } catch (error) {
-        const failure = {
-          status: 'failed',
-          id: item.id,
-          title: item.title,
-          detailUrl: buildDetailUrl(item.id),
-          error: error.message,
-        };
-        manifest.push(failure);
-        console.error(`Failed: ${item.title}`);
-        console.error(error.message);
-      }
-    }
+    console.log(`Concurrency: ${Math.min(options.concurrency, limitedItems.length)}`);
+    manifest = await downloadWithWorkers({
+      context,
+      items: limitedItems,
+      options,
+      prompt,
+    });
   } finally {
     closePrompt(prompt);
     activePrompt = null;

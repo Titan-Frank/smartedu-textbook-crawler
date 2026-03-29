@@ -92,6 +92,7 @@ function buildCrawlerArgs(payload) {
   if (payload.headless) args.push('--headless');
   if (payload.force) args.push('--force');
   if (payload.limit) args.push('--limit', String(payload.limit));
+  if (payload.concurrency) args.push('--concurrency', String(payload.concurrency));
   if (payload.stage) args.push('--stage', String(payload.stage));
   if (payload.subject) args.push('--subject', String(payload.subject));
   if (payload.publisher) args.push('--publisher', String(payload.publisher));

@@ -130,6 +130,12 @@ node .\scripts\smartedu_textbook_batch.js --all-electronic --stage 小学 --subj
 node .\scripts\smartedu_textbook_batch.js --all-electronic --stage 高中 --subject 数学 --publisher 沪教版 --output-dir .\downloads\smartedu_highschool_math_hj
 ```
 
+例如并发下载 4 本：
+
+```powershell
+node .\scripts\smartedu_textbook_batch.js --all-electronic --stage 初中 --subject 英语 --concurrency 4 --output-dir .\downloads\smartedu_junior_english
+```
+
 ## 常用参数
 
 - `--all-electronic`：抓全站所有电子教材
@@ -139,6 +145,7 @@ node .\scripts\smartedu_textbook_batch.js --all-electronic --stage 高中 --subj
 - `--headless`：无头运行
 - `--force`：即使文件已存在也重新下载
 - `--limit <n>`：只下载前 `n` 本
+- `--concurrency <n>`：同时并发下载的教材数量，默认 `1`
 - `--stage <名称>`：学段过滤，如 `小学`、`初中`、`高中`
 - `--subject <名称>`：学科过滤，如 `数学`、`语文`
 - `--publisher <名称>`：版本过滤，如 `沪教版`、`统编版`
@@ -157,6 +164,7 @@ Windows 路径示例：
 - 脚本默认会优先打开本机 Chrome 持久化会话
 - 如果本机 Chrome 不可用，会回退到 Playwright Chromium
 - 如果某本教材需要登录后才能查看，脚本会提示你先在浏览器中完成登录，再按回车继续
+- 并发下载时会复用同一个浏览器登录态，建议先从 `2-4` 的并发数开始
 - 登录态默认保存在：
 
 ```bash
