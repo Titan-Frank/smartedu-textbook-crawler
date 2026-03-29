@@ -91,6 +91,7 @@ function buildCrawlerArgs(payload) {
   if (payload.userDataDir) args.push('--user-data-dir', String(payload.userDataDir));
   if (payload.headless) args.push('--headless');
   if (payload.force) args.push('--force');
+  if (payload.resume === false) args.push('--no-resume');
   if (payload.limit) args.push('--limit', String(payload.limit));
   if (payload.concurrency) args.push('--concurrency', String(payload.concurrency));
   if (payload.stage) args.push('--stage', String(payload.stage));

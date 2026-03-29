@@ -41,6 +41,7 @@ function parseArgs(argv) {
     force: false,
     limit: 0,
     concurrency: 1,
+    resume: true,
     tags: [],
     keyword: '',
   };
@@ -70,6 +71,10 @@ function parseArgs(argv) {
     } else if (arg === '--concurrency') {
       options.concurrency = parseIntegerOption(argv[index + 1], '--concurrency', { min: 1 });
       index += 1;
+    } else if (arg === '--resume') {
+      options.resume = true;
+    } else if (arg === '--no-resume') {
+      options.resume = false;
     } else if (arg === '--tag') {
       const value = argv[index + 1] || '';
       if (!value) {
@@ -154,6 +159,8 @@ Options:
   --force                 Re-download files even if they already exist
   --limit <n>             Download only the first n matched textbooks
   --concurrency <n>       Number of textbooks to download in parallel
+  --resume                Resume from existing manifest.json (default)
+  --no-resume             Ignore manifest.json and start the task fresh
   --tag <name>            Extra tag-name filter, repeatable
   --stage <name>          Convenience tag filter, e.g. 小学/初中/高中
   --subject <name>        Convenience tag filter, e.g. 数学/语文
@@ -471,6 +478,7 @@ async function downloadOneBook({ page, item, seq, outputDir, force, ensureLogged
 
   if (!force && fs.existsSync(outputPath)) {
     return {
+      seq,
       status: 'skipped',
       id: item.id,
       title: item.title,
@@ -517,6 +525,7 @@ async function downloadOneBook({ page, item, seq, outputDir, force, ensureLogged
   const stats = await fs.promises.stat(outputPath);
 
   return {
+    seq,
     status: 'downloaded',
     id: item.id,
     title: item.title,
@@ -525,6 +534,130 @@ async function downloadOneBook({ page, item, seq, outputDir, force, ensureLogged
     outputPath,
     bytes: stats.size,
     pages,
+  };
+}
+
+function getManifestPath(outputDir) {
+  return path.join(outputDir, 'manifest.json');
+}
+
+async function loadManifest(outputDir) {
+  const manifestPath = getManifestPath(outputDir);
+  if (!fs.existsSync(manifestPath)) {
+    return [];
+  }
+
+  try {
+    const raw = await fs.promises.readFile(manifestPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    console.warn(`Failed to read existing manifest, ignoring resume state. Detail: ${error.message}`);
+    return [];
+  }
+}
+
+function createResumeEntry({ previousEntry, item, seq, outputDir }) {
+  const detailUrl = buildDetailUrl(item.id);
+  const outputPath = path.join(outputDir, buildOutputFilename(item, seq));
+  const result = {
+    ...previousEntry,
+    seq,
+    id: item.id,
+    title: item.title,
+    detailUrl,
+    outputPath,
+    resumed: true,
+  };
+
+  if (fs.existsSync(outputPath)) {
+    const stats = fs.statSync(outputPath);
+    result.bytes = stats.size;
+  }
+
+  return result;
+}
+
+function shouldResumeItem({ previousEntry, item, seq, outputDir, options }) {
+  if (!options.resume || options.force || !previousEntry) {
+    return null;
+  }
+
+  if (previousEntry.id !== item.id) {
+    return null;
+  }
+
+  if (previousEntry.status !== 'downloaded' && previousEntry.status !== 'skipped') {
+    return null;
+  }
+
+  const outputPath = path.join(outputDir, buildOutputFilename(item, seq));
+  if (!fs.existsSync(outputPath)) {
+    return null;
+  }
+
+  return createResumeEntry({ previousEntry, item, seq, outputDir });
+}
+
+function createManifestStore({ outputDir, items, previousEntries }) {
+  const manifestPath = getManifestPath(outputDir);
+  const manifest = new Array(items.length).fill(null);
+  const previousEntryMap = new Map(
+    previousEntries
+      .filter((entry) => entry && entry.id)
+      .map((entry) => [entry.id, entry]),
+  );
+  let writeQueue = Promise.resolve();
+
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    const previousEntry = previousEntryMap.get(item.id);
+    if (!previousEntry) {
+      continue;
+    }
+    manifest[index] = {
+      ...previousEntry,
+      seq: index + 1,
+      id: item.id,
+      title: item.title,
+      detailUrl: buildDetailUrl(item.id),
+      outputPath:
+        previousEntry.outputPath || path.join(outputDir, buildOutputFilename(item, index + 1)),
+    };
+  }
+
+  function snapshot() {
+    return manifest
+      .filter(Boolean)
+      .slice()
+      .sort((left, right) => (left.seq || 0) - (right.seq || 0));
+  }
+
+  async function persist() {
+    writeQueue = writeQueue.then(() =>
+      fs.promises.writeFile(manifestPath, `${JSON.stringify(snapshot(), null, 2)}\n`, 'utf8'),
+    );
+
+    try {
+      await writeQueue;
+    } catch (error) {
+      console.warn(`Failed to save manifest checkpoint. Detail: ${error.message}`);
+    }
+  }
+
+  return {
+    manifestPath,
+    get(index) {
+      return manifest[index];
+    },
+    async set(index, entry) {
+      manifest[index] = entry;
+      await persist();
+    },
+    async flush() {
+      await persist();
+    },
+    snapshot,
   };
 }
 
@@ -540,10 +673,9 @@ async function createWorkerPages(context, workerCount) {
   return pages;
 }
 
-async function downloadWithWorkers({ context, items, options, prompt }) {
+async function downloadWithWorkers({ context, items, options, prompt, manifestStore }) {
   const workerCount = Math.min(options.concurrency, items.length);
   const pages = await createWorkerPages(context, workerCount);
-  const manifest = new Array(items.length);
   const ensureLoggedIn = createLoginCoordinator(prompt);
   let nextIndex = 0;
 
@@ -559,6 +691,22 @@ async function downloadWithWorkers({ context, items, options, prompt }) {
         }
 
         const item = items[itemIndex];
+        const resumeEntry = shouldResumeItem({
+          previousEntry: manifestStore.get(itemIndex),
+          item,
+          seq: itemIndex + 1,
+          outputDir: options.outputDir,
+          options,
+        });
+
+        if (resumeEntry) {
+          await manifestStore.set(itemIndex, resumeEntry);
+          console.log(
+            `\n[${itemIndex + 1}/${items.length}] [${workerLabel}] 续传跳过: ${item.title}`,
+          );
+          continue;
+        }
+
         console.log(`\n[${itemIndex + 1}/${items.length}] [${workerLabel}] ${item.title}`);
 
         try {
@@ -570,17 +718,18 @@ async function downloadWithWorkers({ context, items, options, prompt }) {
             force: options.force,
             ensureLoggedIn,
           });
-          manifest[itemIndex] = result;
+          await manifestStore.set(itemIndex, result);
           console.log(`[${workerLabel}] Saved: ${result.outputPath}`);
         } catch (error) {
           const failure = {
+            seq: itemIndex + 1,
             status: 'failed',
             id: item.id,
             title: item.title,
             detailUrl: buildDetailUrl(item.id),
             error: error.message,
           };
-          manifest[itemIndex] = failure;
+          await manifestStore.set(itemIndex, failure);
           console.error(`[${workerLabel}] Failed: ${item.title}`);
           console.error(error.message);
         }
@@ -588,11 +737,11 @@ async function downloadWithWorkers({ context, items, options, prompt }) {
     }),
   );
 
-  return manifest;
+  return manifestStore.snapshot();
 }
 
 async function saveManifest(outputDir, manifest) {
-  const manifestPath = path.join(outputDir, 'manifest.json');
+  const manifestPath = getManifestPath(outputDir);
   await fs.promises.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   return manifestPath;
 }
@@ -645,6 +794,7 @@ async function main() {
 
   const items = await collectMatchedItems(options);
   const limitedItems = options.limit > 0 ? items.slice(0, options.limit) : items;
+  const previousManifest = options.resume && !options.force ? await loadManifest(options.outputDir) : [];
 
   if (limitedItems.length === 0) {
     throw new Error('No matching textbooks were found for the provided SmartEdu page');
@@ -654,6 +804,9 @@ async function main() {
   limitedItems.forEach((item, index) => {
     console.log(`${String(index + 1).padStart(2, '0')}. ${item.title}`);
   });
+  if (options.resume && !options.force && previousManifest.length > 0) {
+    console.log(`Resume checkpoint found: ${previousManifest.length} entries`);
+  }
 
   let chromium;
   try {
@@ -669,6 +822,11 @@ async function main() {
   const context = await launchBrowserContext(chromium, options);
   activeContext = context;
   let manifest = [];
+  const manifestStore = createManifestStore({
+    outputDir: options.outputDir,
+    items: limitedItems,
+    previousEntries: previousManifest,
+  });
 
   try {
     console.log(`Concurrency: ${Math.min(options.concurrency, limitedItems.length)}`);
@@ -677,6 +835,7 @@ async function main() {
       items: limitedItems,
       options,
       prompt,
+      manifestStore,
     });
   } finally {
     closePrompt(prompt);
@@ -685,6 +844,7 @@ async function main() {
     activeContext = null;
   }
 
+  await manifestStore.flush();
   const manifestPath = await saveManifest(options.outputDir, manifest);
   const downloadedCount = manifest.filter((item) => item.status === 'downloaded').length;
   const skippedCount = manifest.filter((item) => item.status === 'skipped').length;

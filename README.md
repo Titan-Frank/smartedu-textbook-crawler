@@ -146,6 +146,8 @@ node .\scripts\smartedu_textbook_batch.js --all-electronic --stage 初中 --subj
 - `--force`：即使文件已存在也重新下载
 - `--limit <n>`：只下载前 `n` 本
 - `--concurrency <n>`：同时并发下载的教材数量，默认 `1`
+- `--resume`：从输出目录已有的 `manifest.json` 恢复进度，默认开启
+- `--no-resume`：忽略已有 `manifest.json`，本次从头开始扫描任务
 - `--stage <名称>`：学段过滤，如 `小学`、`初中`、`高中`
 - `--subject <名称>`：学科过滤，如 `数学`、`语文`
 - `--publisher <名称>`：版本过滤，如 `沪教版`、`统编版`
@@ -165,6 +167,7 @@ Windows 路径示例：
 - 如果本机 Chrome 不可用，会回退到 Playwright Chromium
 - 如果某本教材需要登录后才能查看，脚本会提示你先在浏览器中完成登录，再按回车继续
 - 并发下载时会复用同一个浏览器登录态，建议先从 `2-4` 的并发数开始
+- 每完成一本教材都会立即更新 `manifest.json`，中断后重新运行可继续未完成部分
 - 登录态默认保存在：
 
 ```bash
@@ -180,6 +183,13 @@ Windows 路径示例：
 - 下载好的 PDF 文件
 - 文件名默认包含关键标签：`序号_学段_学科_版本_年级_册次_标题_ID.pdf`
 - `manifest.json`：记录每本教材的下载结果、详情页地址、输出路径、失败原因等
+
+## 断点续传说明
+
+- 默认会读取输出目录下已有的 `manifest.json`
+- 如果某本教材在 `manifest.json` 中已完成，且对应 PDF 仍然存在，重新运行时会直接跳过
+- 如果中途中断，已完成部分仍保留在 `manifest.json` 中，下次会从未完成部分继续
+- 如果你想无视历史进度重新抓取，可以加 `--force` 或 `--no-resume`
 
 ## 查看帮助
 

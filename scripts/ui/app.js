@@ -98,6 +98,7 @@ function collectFormPayload() {
     limit: Number(formData.get('limit') || 0),
     concurrency: Number(formData.get('concurrency') || 1),
     headless: formData.get('headless') === 'on',
+    resume: formData.get('resume') === 'on',
     force: formData.get('force') === 'on',
     tags: formData
       .get('tags')
