@@ -14,6 +14,33 @@ const CRAWLER_SCRIPT = path.join(__dirname, 'smartedu_textbook_batch.js');
 let currentJob = null;
 let nextJobId = 1;
 
+function isJobActive(job) {
+  return job && (job.status === 'running' || job.status === 'stopping');
+}
+
+function forceKillProcessTree(job) {
+  if (!job?.process?.pid || !isJobActive(job)) {
+    return;
+  }
+
+  if (process.platform === 'win32') {
+    const killer = spawn('taskkill', ['/pid', String(job.process.pid), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    killer.on('error', () => {
+      // Ignore taskkill failures if the process already exited.
+    });
+    return;
+  }
+
+  try {
+    job.process.kill('SIGKILL');
+  } catch (error) {
+    // Ignore kill failures if the process already exited.
+  }
+}
+
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -109,7 +136,7 @@ function serializeJob(job) {
 }
 
 function startJob(payload) {
-  if (currentJob && currentJob.status === 'running') {
+  if (currentJob && isJobActive(currentJob)) {
     throw new Error('A crawl job is already running');
   }
 
@@ -118,6 +145,7 @@ function startJob(payload) {
     cwd: __dirname,
     env: process.env,
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
   });
 
   const job = {
@@ -130,6 +158,7 @@ function startJob(payload) {
     exitCode: null,
     signal: null,
     logs: [],
+    forceKillTimer: null,
   };
   nextJobId += 1;
   currentJob = job;
@@ -152,7 +181,21 @@ function startJob(payload) {
   child.stdout.on('data', (chunk) => appendLog('stdout', chunk));
   child.stderr.on('data', (chunk) => appendLog('stderr', chunk));
   child.on('exit', (code, signal) => {
-    job.status = code === 0 ? 'finished' : 'failed';
+    const wasStopping = job.status === 'stopping';
+    if (job.forceKillTimer) {
+      clearTimeout(job.forceKillTimer);
+      job.forceKillTimer = null;
+    }
+    if (wasStopping || signal === 'SIGINT' || signal === 'SIGTERM' || code === 130) {
+      job.status = 'stopped';
+      job.logs.push({
+        at: new Date().toISOString(),
+        source: 'system',
+        line: 'Job stopped.',
+      });
+    } else {
+      job.status = code === 0 ? 'finished' : 'failed';
+    }
     job.endedAt = new Date().toISOString();
     job.exitCode = code;
     job.signal = signal;
@@ -165,14 +208,26 @@ function stopJob() {
   if (!currentJob || currentJob.status !== 'running') {
     throw new Error('No running job');
   }
-  currentJob.process.kill('SIGTERM');
-  currentJob.status = 'stopping';
-  currentJob.logs.push({
+  const job = currentJob;
+  const stopSignal = process.platform === 'win32' ? 'SIGINT' : 'SIGTERM';
+  job.status = 'stopping';
+  job.logs.push({
     at: new Date().toISOString(),
     source: 'system',
-    line: 'Stopping job...',
+    line: `Stopping job with ${stopSignal}...`,
   });
-  return currentJob;
+
+  try {
+    job.process.kill(stopSignal);
+  } catch (error) {
+    forceKillProcessTree(job);
+  }
+
+  job.forceKillTimer = setTimeout(() => {
+    forceKillProcessTree(job);
+  }, 10000);
+
+  return job;
 }
 
 const server = http.createServer(async (req, res) => {

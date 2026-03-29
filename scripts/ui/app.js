@@ -32,6 +32,8 @@ function renderJob(data) {
     setStatus('运行中', 'running');
   } else if (job.status === 'finished') {
     setStatus('已完成', 'success');
+  } else if (job.status === 'stopped') {
+    setStatus('已停止', 'idle');
   } else if (job.status === 'failed') {
     setStatus('失败', 'error');
   } else {

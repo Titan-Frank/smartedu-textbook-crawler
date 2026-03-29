@@ -6,6 +6,11 @@ const readline = require('readline');
 
 const DATA_VERSION_URL =
   'https://s-file-1.ykt.cbern.com.cn/zxx/ndrs/resources/tch_material/version/data_version.json';
+const DEFAULT_PROFILE_DIR = '.smartedu-profile';
+
+let activePrompt = null;
+let activeContext = null;
+let shutdownPromise = null;
 
 function normalizeCliUrl(value) {
   return String(value || '')
@@ -18,7 +23,7 @@ function parseArgs(argv) {
     url: '',
     allElectronic: false,
     outputDir: '',
-    userDataDir: path.resolve('.smartedu-profile'),
+    userDataDir: path.resolve(DEFAULT_PROFILE_DIR),
     headless: false,
     force: false,
     limit: 0,
@@ -37,7 +42,7 @@ function parseArgs(argv) {
       options.outputDir = argv[index + 1] || '';
       index += 1;
     } else if (arg === '--user-data-dir') {
-      options.userDataDir = path.resolve(argv[index + 1] || '.smartedu-profile');
+      options.userDataDir = path.resolve(argv[index + 1] || DEFAULT_PROFILE_DIR);
       index += 1;
     } else if (arg === '--headless') {
       options.headless = true;
@@ -139,13 +144,9 @@ Options:
   --help, -h              Show this help
 
 Example:
-  node scripts/smartedu_textbook_batch.js \\
-    --url 'https://basic.smartedu.cn/tchMaterial?defaultTag=e7bbb2de-0590-11ed-9c79-92fc3b3249d5%2F6a74973a-0772-11ed-ac74-092ab92074e6%2F44bee8bc-54e6-11ed-9c34-850ba61fa9f4%2Fe7bbd296-0590-11ed-9c79-92fc3b3249d5' \\
-    --output-dir ./downloads/smartedu_textbooks
+  node scripts/smartedu_textbook_batch.js --url "https://basic.smartedu.cn/tchMaterial?defaultTag=e7bbb2de-0590-11ed-9c79-92fc3b3249d5%2F6a74973a-0772-11ed-ac74-092ab92074e6%2F44bee8bc-54e6-11ed-9c34-850ba61fa9f4%2Fe7bbd296-0590-11ed-9c79-92fc3b3249d5" --output-dir ./downloads/smartedu_textbooks
 
-  node scripts/smartedu_textbook_batch.js \\
-    --all-electronic --stage 小学 --subject 数学 \\
-    --output-dir ./downloads/smartedu_primary_math
+  node scripts/smartedu_textbook_batch.js --all-electronic --stage 小学 --subject 数学 --output-dir ./downloads/smartedu_primary_math
 `);
   process.exit(exitCode);
 }
@@ -245,6 +246,10 @@ function extractSourcePdfUrl(frameUrl) {
 }
 
 function createPrompt() {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return null;
+  }
+
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -260,6 +265,47 @@ function createPrompt() {
       rl.close();
     },
   };
+}
+
+function closePrompt(prompt) {
+  if (!prompt) {
+    return;
+  }
+  try {
+    prompt.close();
+  } catch (error) {
+    // Ignore readline close errors during shutdown.
+  }
+}
+
+async function closeContext(context) {
+  if (!context) {
+    return;
+  }
+  try {
+    await context.close();
+  } catch (error) {
+    // Ignore browser close errors during shutdown.
+  }
+}
+
+function installSignalHandlers() {
+  const handleSignal = (signal) => {
+    if (shutdownPromise) {
+      return;
+    }
+
+    console.warn(`\nReceived ${signal}, shutting down crawler...`);
+    shutdownPromise = (async () => {
+      closePrompt(activePrompt);
+      await closeContext(activeContext);
+    })().finally(() => {
+      process.exit(130);
+    });
+  };
+
+  process.once('SIGINT', () => handleSignal('SIGINT'));
+  process.once('SIGTERM', () => handleSignal('SIGTERM'));
 }
 
 async function ensureDir(directory) {
@@ -349,7 +395,18 @@ async function waitForPdfReady(frame, page, timeoutMs) {
 async function promptForLogin(prompt, page) {
   console.log('\nSmartEdu 可能要求登录后才能查看原始 PDF。');
   console.log(`当前页面：${page.url()}`);
-  await prompt.ask('请在打开的浏览器里完成登录，然后回车继续...');
+
+  if (prompt) {
+    await prompt.ask('请在打开的浏览器里完成登录，然后回车继续...');
+    return;
+  }
+
+  console.log('当前终端不可交互，改为在浏览器中等待登录完成...');
+  await page.waitForFunction(
+    () => !window.location.href.includes('/uias/login'),
+    undefined,
+    { timeout: 300000 },
+  );
 }
 
 async function downloadOneBook({ page, item, seq, outputDir, force, prompt }) {
@@ -463,6 +520,7 @@ async function launchBrowserContext(chromium, options) {
 }
 
 async function main() {
+  installSignalHandlers();
   const options = parseArgs(process.argv.slice(2));
   await ensureDir(options.outputDir);
 
@@ -487,8 +545,10 @@ async function main() {
     );
   }
   const prompt = createPrompt();
+  activePrompt = prompt;
 
   const context = await launchBrowserContext(chromium, options);
+  activeContext = context;
 
   const page = context.pages()[0] || (await context.newPage());
   const manifest = [];
@@ -522,8 +582,10 @@ async function main() {
       }
     }
   } finally {
-    prompt.close();
-    await context.close();
+    closePrompt(prompt);
+    activePrompt = null;
+    await closeContext(context);
+    activeContext = null;
   }
 
   const manifestPath = await saveManifest(options.outputDir, manifest);

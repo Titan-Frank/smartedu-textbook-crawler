@@ -1,0 +1,11 @@
+{
+  "name": "smartedu-textbook-crawler",
+  "private": true,
+  "scripts": {
+    "setup": "npm --prefix scripts install",
+    "crawl-ui": "npm --prefix scripts install && npm --prefix scripts run crawl-ui",
+    "crawl-ui:open": "powershell -ExecutionPolicy Bypass -File ./start-ui-open.ps1",
+    "crawl": "node ./scripts/smartedu_textbook_batch.js",
+    "playwright:install": "npm --prefix scripts exec playwright install chromium"
+  }
+}

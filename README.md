@@ -4,6 +4,8 @@
 
 当前脚本通过教材详情页内嵌的 PDF.js viewer 读取原始 PDF 数据并保存，因此适合处理直接 `curl` 容易返回 `401` 的教材资源。
 
+项目现在已适配 Windows、macOS 和 Linux。命令行示例尽量使用单行写法，便于直接在 PowerShell、CMD 或 Bash 中执行。
+
 ## 文件
 
 - 脚本：`scripts/smartedu_textbook_batch.js`
@@ -12,10 +14,19 @@
 
 ## 依赖
 
-需要先安装 Node.js，然后安装 Playwright：
+需要先安装 Node.js 18+，然后安装 Playwright。
 
-```bash
-npm install playwright
+如果你想直接在项目根目录操作，现在也可以：
+
+```powershell
+npm run setup
+```
+
+推荐在 [`scripts/package.json`](./scripts/package.json) 所在目录安装依赖：
+
+```powershell
+Set-Location .\scripts
+npm install
 ```
 
 浏览器使用顺序：
@@ -25,7 +36,7 @@ npm install playwright
 
 如果你没有安装 Chrome，或者想使用 Playwright 自带浏览器，再执行：
 
-```bash
+```powershell
 npx playwright install chromium
 ```
 
@@ -33,13 +44,47 @@ npx playwright install chromium
 
 ### 0. 启动本地前端
 
-```bash
-cd /Users/titan-frank/Documents/hsd/research/crawl/scripts
+最省事的根目录启动方式：
+
+```powershell
+npm run crawl-ui
+```
+
+或者直接双击 / 执行：
+
+```powershell
+.\start-ui.ps1
+```
+
+如果你想启动后自动打开浏览器：
+
+```powershell
+npm run crawl-ui:open
+```
+
+或者直接双击：
+
+```powershell
+.\start-ui-open.ps1
+```
+
+Windows PowerShell：
+
+```powershell
+Set-Location .\scripts
 npm install
 npm run crawl-ui
 ```
 
-打开：
+macOS / Linux：
+
+```bash
+cd ./scripts
+npm install
+npm run crawl-ui
+```
+
+然后打开：
 
 ```text
 http://127.0.0.1:3210
@@ -47,43 +92,42 @@ http://127.0.0.1:3210
 
 前端会在本机启动爬虫脚本，并实时显示日志。
 
+如果你使用的是 Windows `cmd`，也可以直接运行：
+
+```bat
+start-ui.cmd
+```
+
+自动打开浏览器的 `cmd` 版本：
+
+```bat
+start-ui-open.cmd
+```
+
 ### 1. 抓取全站所有电子教材
 
-```bash
-node scripts/smartedu_textbook_batch.js \
-  --all-electronic \
-  --output-dir ./downloads/smartedu_all_electronic
+```powershell
+node .\scripts\smartedu_textbook_batch.js --all-electronic --output-dir .\downloads\smartedu_all_electronic
 ```
 
 ### 2. 抓取某个筛选页下的全部教材
 
-```bash
-node scripts/smartedu_textbook_batch.js \
-  --url 'https://basic.smartedu.cn/tchMaterial?defaultTag=xxx' \
-  --output-dir ./downloads/smartedu_page_books
+```powershell
+node .\scripts\smartedu_textbook_batch.js --url 'https://basic.smartedu.cn/tchMaterial?defaultTag=xxx' --output-dir .\downloads\smartedu_page_books
 ```
 
 ### 3. 抓取全站中某类教材
 
 例如抓“小学数学”：
 
-```bash
-node scripts/smartedu_textbook_batch.js \
-  --all-electronic \
-  --stage 小学 \
-  --subject 数学 \
-  --output-dir ./downloads/smartedu_primary_math
+```powershell
+node .\scripts\smartedu_textbook_batch.js --all-electronic --stage 小学 --subject 数学 --output-dir .\downloads\smartedu_primary_math
 ```
 
 例如抓“沪教版高中数学”：
 
-```bash
-node scripts/smartedu_textbook_batch.js \
-  --all-electronic \
-  --stage 高中 \
-  --subject 数学 \
-  --publisher 沪教版 \
-  --output-dir ./downloads/smartedu_highschool_math_hj
+```powershell
+node .\scripts\smartedu_textbook_batch.js --all-electronic --stage 高中 --subject 数学 --publisher 沪教版 --output-dir .\downloads\smartedu_highschool_math_hj
 ```
 
 ## 常用参数
@@ -103,6 +147,11 @@ node scripts/smartedu_textbook_batch.js \
 - `--tag <名称>`：额外标签过滤，可重复传入
 - `--keyword <关键词>`：按标题或出版社名模糊过滤
 
+Windows 路径示例：
+
+- `--output-dir C:\smartedu\downloads`
+- `--user-data-dir C:\smartedu\profile`
+
 ## 登录说明
 
 - 脚本默认会优先打开本机 Chrome 持久化会话
@@ -111,7 +160,7 @@ node scripts/smartedu_textbook_batch.js \
 - 登录态默认保存在：
 
 ```bash
-.smartedu-profile
+.\.smartedu-profile
 ```
 
 你也可以通过 `--user-data-dir` 指定其他目录。
@@ -127,7 +176,7 @@ node scripts/smartedu_textbook_batch.js \
 ## 查看帮助
 
 ```bash
-node scripts/smartedu_textbook_batch.js --help
+npm run crawl -- --help
 ```
 
 ## GitHub 上传
