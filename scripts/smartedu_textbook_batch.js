@@ -9,9 +9,6 @@ const DATA_VERSION_URL =
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const DEFAULT_PROFILE_DIR = '.smartedu-profile';
 const DETAIL_PAGE_ERROR_PATTERNS = [
-  '403',
-  '404',
-  '500',
   'forbidden',
   'not found',
   'access denied',
@@ -299,15 +296,6 @@ async function inspectDetailPageState(page, response) {
     return {
       loginRequired: true,
       fatalMessage: '',
-    };
-  }
-
-  const status =
-    response && typeof response.status === 'function' ? response.status() : null;
-  if (typeof status === 'number' && status >= 400) {
-    return {
-      loginRequired: false,
-      fatalMessage: `Detail page responded with HTTP ${status}`,
     };
   }
 
