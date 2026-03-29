@@ -8,6 +8,23 @@ const DATA_VERSION_URL =
   'https://s-file-1.ykt.cbern.com.cn/zxx/ndrs/resources/tch_material/version/data_version.json';
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const DEFAULT_PROFILE_DIR = '.smartedu-profile';
+const DETAIL_PAGE_ERROR_PATTERNS = [
+  '403',
+  '404',
+  '500',
+  'forbidden',
+  'not found',
+  'access denied',
+  '无权限',
+  '暂无权限',
+  '拒绝访问',
+  '资源不存在',
+  '内容不存在',
+  '页面不存在',
+  '服务异常',
+  '服务繁忙',
+  '加载失败',
+];
 
 let activePrompt = null;
 let activeContext = null;
@@ -272,6 +289,58 @@ function extractSourcePdfUrl(frameUrl) {
   }
 }
 
+function isLoginPageUrl(url) {
+  return String(url || '').includes('/uias/login');
+}
+
+async function inspectDetailPageState(page, response) {
+  const currentUrl = page.url();
+  if (isLoginPageUrl(currentUrl)) {
+    return {
+      loginRequired: true,
+      fatalMessage: '',
+    };
+  }
+
+  const status =
+    response && typeof response.status === 'function' ? response.status() : null;
+  if (typeof status === 'number' && status >= 400) {
+    return {
+      loginRequired: false,
+      fatalMessage: `Detail page responded with HTTP ${status}`,
+    };
+  }
+
+  try {
+    const bodyText = await page.evaluate(() => (document.body?.innerText || '').replace(/\s+/g, ' ').trim());
+    if (!bodyText) {
+      return {
+        loginRequired: false,
+        fatalMessage: '',
+      };
+    }
+
+    const normalized = bodyText.toLowerCase();
+    const matchedPattern = DETAIL_PAGE_ERROR_PATTERNS.find((pattern) =>
+      normalized.includes(pattern.toLowerCase()),
+    );
+    if (matchedPattern) {
+      const snippet = bodyText.slice(0, 160);
+      return {
+        loginRequired: false,
+        fatalMessage: `Detail page shows an error state: ${snippet || matchedPattern}`,
+      };
+    }
+  } catch (error) {
+    // Ignore transient evaluation errors while the page is still rendering.
+  }
+
+  return {
+    loginRequired: false,
+    fatalMessage: '',
+  };
+}
+
 function createPrompt() {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     return null;
@@ -395,11 +464,29 @@ async function waitForPdfFrame(page, timeoutMs) {
   while (Date.now() - start < timeoutMs) {
     const frame = page.frames().find((entry) => isPdfViewerFrameUrl(entry.url()));
     if (frame) {
-      return frame;
+      return {
+        frame,
+        loginRequired: false,
+      };
     }
+
+    const state = await inspectDetailPageState(page);
+    if (state.loginRequired) {
+      return {
+        frame: null,
+        loginRequired: true,
+      };
+    }
+    if (state.fatalMessage) {
+      throw new Error(state.fatalMessage);
+    }
+
     await page.waitForTimeout(1000);
   }
-  return null;
+  return {
+    frame: null,
+    loginRequired: false,
+  };
 }
 
 function isPdfViewerFrameUrl(frameUrl) {
@@ -421,6 +508,14 @@ function isPdfViewerFrameUrl(frameUrl) {
 async function waitForPdfReady(frame, page, timeoutMs) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
+    const state = await inspectDetailPageState(page);
+    if (state.loginRequired) {
+      throw new Error('Login expired while waiting for the PDF viewer');
+    }
+    if (state.fatalMessage) {
+      throw new Error(state.fatalMessage);
+    }
+
     try {
       const ready = await frame.evaluate(() => !!window.PDFViewerApplication?.pdfDocument);
       const pages = await frame.evaluate(() => window.PDFViewerApplication?.pagesCount || 0);
@@ -488,14 +583,23 @@ async function downloadOneBook({ page, item, seq, outputDir, force, ensureLogged
     };
   }
 
-  await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
-
-  let frame = await waitForPdfFrame(page, 15000);
-  if (!frame) {
-    await ensureLoggedIn(page);
-    await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
-    frame = await waitForPdfFrame(page, 120000);
+  let response = await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
+  let state = await inspectDetailPageState(page, response);
+  if (state.fatalMessage) {
+    throw new Error(state.fatalMessage);
   }
+
+  let frameState = await waitForPdfFrame(page, 15000);
+  if (!frameState.frame && frameState.loginRequired) {
+    await ensureLoggedIn(page);
+    response = await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
+    state = await inspectDetailPageState(page, response);
+    if (state.fatalMessage) {
+      throw new Error(state.fatalMessage);
+    }
+    frameState = await waitForPdfFrame(page, 30000);
+  }
+  const frame = frameState.frame;
   if (!frame) {
     throw new Error('PDF.js iframe was not found on the detail page');
   }
