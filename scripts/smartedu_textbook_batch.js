@@ -235,6 +235,44 @@ function itemMatchesKeyword(item, keyword) {
   return haystack.includes(keyword.toLowerCase());
 }
 
+function getItemResourceType(item) {
+  const originType = getItemOriginType(item);
+  if (String(originType).includes('专题课')) {
+    return 'thematic_course';
+  }
+  return item.resource_type_code || item.custom_properties?.prom_resouce_type || 'assets_document';
+}
+
+function getItemOriginType(item) {
+  return item.custom_properties?.ext_properties?.origin_type || item.custom_properties?.origin_type || '';
+}
+
+function getContentTypeForItem(item) {
+  const resourceType = String(item.resourceType || getItemResourceType(item) || '').toLowerCase();
+  if (resourceType === 'thematic_course') {
+    return 'thematic_course';
+  }
+  return 'assets_document';
+}
+
+function classifyItemSupport(item) {
+  const resourceType = String(item.resourceType || getItemResourceType(item) || '').toLowerCase();
+
+  if (!resourceType || resourceType === 'assets_document' || resourceType === 'thematic_course') {
+    return {
+      supported: true,
+      reason: '',
+      message: '',
+    };
+  }
+
+  return {
+    supported: false,
+    reason: 'unsupported_resource_type',
+    message: `Unsupported resource type: ${resourceType}`,
+  };
+}
+
 function sanitizeFilename(value) {
   return value
     .replace(/[\\/:*?"<>|]/g, '_')
@@ -273,8 +311,12 @@ function buildOutputFilename(item, seq) {
   return `${sanitizeFilename(parts.join('_'))}.pdf`;
 }
 
-function buildDetailUrl(itemId) {
-  return `https://basic.smartedu.cn/tchMaterial/detail?contentType=assets_document&contentId=${itemId}&catalogType=tchMaterial&subCatalog=tchMaterial`;
+function buildDetailUrl(itemId, contentType = 'assets_document') {
+  return `https://basic.smartedu.cn/tchMaterial/detail?contentType=${contentType}&contentId=${itemId}&catalogType=tchMaterial&subCatalog=tchMaterial`;
+}
+
+function buildThematicCourseResourcesUrl(itemId) {
+  return `https://s-file-2.ykt.cbern.com.cn/zxx/ndrs/special_edu/thematic_course/${itemId}/resources/list.json`;
 }
 
 function extractSourcePdfUrl(frameUrl) {
@@ -434,6 +476,9 @@ async function collectMatchedItems(options) {
         title: item.title,
         tags: (item.tag_list || []).map((tag) => tag.tag_name),
         provider: item.provider_list?.[0]?.name || '',
+        resourceType: getItemResourceType(item),
+        originType: getItemOriginType(item),
+        contentType: getContentTypeForItem(item),
         stage: (item.tag_list || []).find((tag) => tag.tag_dimension_id === 'zxxxd')?.tag_name || '',
         subject: (item.tag_list || []).find((tag) => tag.tag_dimension_id === 'zxxxk')?.tag_name || '',
         publisherTag: (item.tag_list || []).find((tag) => tag.tag_dimension_id === 'zxxbb')?.tag_name || '',
@@ -535,6 +580,18 @@ async function promptForLogin(prompt, page) {
   );
 }
 
+function createSkipResult({ seq, item, detailUrl, outputPath, reason }) {
+  return {
+    seq,
+    status: 'skipped',
+    id: item.id,
+    title: item.title,
+    detailUrl,
+    outputPath,
+    reason,
+  };
+}
+
 function createLoginCoordinator(prompt) {
   let currentLoginPromise = null;
 
@@ -554,21 +611,116 @@ function createLoginCoordinator(prompt) {
   };
 }
 
-async function downloadOneBook({ page, item, seq, outputDir, force, ensureLoggedIn }) {
-  const detailUrl = buildDetailUrl(item.id);
+async function saveUrlToFile(url, outputPath) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to download ${url}: ${response.status} ${response.statusText}`);
+  }
+  const buffer = Buffer.from(await response.arrayBuffer());
+  await fs.promises.writeFile(outputPath, buffer);
+}
+
+function collectThematicCoursePdfCandidates(resources) {
+  const candidates = [];
+
+  for (const resource of Array.isArray(resources) ? resources : []) {
+    for (const tiItem of resource.ti_items || []) {
+      const isPdf = String(tiItem.ti_format || '').toLowerCase() === 'pdf';
+      if (!isPdf || !tiItem.ti_is_source_file) {
+        continue;
+      }
+
+      const storages = Array.isArray(tiItem.ti_storages) ? tiItem.ti_storages.filter(Boolean) : [];
+      const pages = Number.parseInt(
+        String(
+          (tiItem.custom_properties?.requirements || []).find((entry) => entry.name === 'pagesize')?.value || '0',
+        ),
+        10,
+      );
+      candidates.push({
+        resourceId: resource.id,
+        resourceTitle: resource.title || resource.global_title?.['zh-CN'] || '',
+        fileName: decodeURIComponent(String(storages[0] || '').split('/').pop() || ''),
+        size: Number(tiItem.ti_size || 0),
+        pages: Number.isFinite(pages) && pages > 0 ? pages : 0,
+        storageUrls: storages,
+      });
+    }
+  }
+
+  return candidates;
+}
+
+function pickPrimaryThematicCoursePdfCandidate(candidates) {
+  if (!candidates.length) {
+    return null;
+  }
+
+  return candidates
+    .slice()
+    .sort((left, right) => {
+      if (right.size !== left.size) {
+        return right.size - left.size;
+      }
+      return right.pages - left.pages;
+    })[0];
+}
+
+function createThematicCoursePdfWaiter(page, candidate, timeoutMs) {
+  const fileName = candidate?.fileName || '';
+  let timer = null;
+  let active = true;
+
+  const cleanup = () => {
+    if (!active) {
+      return;
+    }
+    active = false;
+    clearTimeout(timer);
+    page.off('response', onResponse);
+  };
+
+  const onResponse = (response) => {
+    const url = response.url();
+    const matchesPdf = /\.pdf(?:$|\?)/i.test(url);
+    const matchesName = !fileName || decodeURIComponent(url).includes(fileName);
+    const matchesStatus = response.status() === 200 || response.status() === 206;
+
+    if (matchesPdf && matchesName && matchesStatus) {
+      cleanup();
+      resolver(url);
+    }
+  };
+
+  let resolver;
+  let rejecter;
+  const promise = new Promise((resolve, reject) => {
+    resolver = resolve;
+    rejecter = reject;
+  });
+
+  timer = setTimeout(() => {
+    cleanup();
+    rejecter(new Error('Timed out waiting for thematic course PDF request'));
+  }, timeoutMs);
+
+  page.on('response', onResponse);
+
+  return {
+    promise,
+    cancel() {
+      cleanup();
+    },
+  };
+}
+
+async function downloadAssetsDocumentBook({ page, item, seq, outputDir, force, ensureLoggedIn }) {
+  const detailUrl = buildDetailUrl(item.id, item.contentType);
   const filename = buildOutputFilename(item, seq);
   const outputPath = path.join(outputDir, filename);
 
   if (!force && fs.existsSync(outputPath)) {
-    return {
-      seq,
-      status: 'skipped',
-      id: item.id,
-      title: item.title,
-      detailUrl,
-      outputPath,
-      reason: 'already_exists',
-    };
+    return createSkipResult({ seq, item, detailUrl, outputPath, reason: 'already_exists' });
   }
 
   let response = await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
@@ -629,6 +781,63 @@ async function downloadOneBook({ page, item, seq, outputDir, force, ensureLogged
   };
 }
 
+async function downloadThematicCourseBook({ page, item, seq, outputDir, force, ensureLoggedIn }) {
+  const detailUrl = buildDetailUrl(item.id, item.contentType);
+  const filename = buildOutputFilename(item, seq);
+  const outputPath = path.join(outputDir, filename);
+
+  if (!force && fs.existsSync(outputPath)) {
+    return createSkipResult({ seq, item, detailUrl, outputPath, reason: 'already_exists' });
+  }
+
+  const resources = await fetchJson(buildThematicCourseResourcesUrl(item.id));
+  const pdfCandidates = collectThematicCoursePdfCandidates(resources);
+  const primaryCandidate = pickPrimaryThematicCoursePdfCandidate(pdfCandidates);
+  if (!primaryCandidate) {
+    throw new Error('No source PDF was found in thematic course resources');
+  }
+
+  let pdfWaiter = createThematicCoursePdfWaiter(page, primaryCandidate, 45000);
+  let response = await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
+  let state = await inspectDetailPageState(page, response);
+  if (state.loginRequired) {
+    pdfWaiter.cancel();
+    await ensureLoggedIn(page);
+    pdfWaiter = createThematicCoursePdfWaiter(page, primaryCandidate, 45000);
+    response = await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
+    state = await inspectDetailPageState(page, response);
+  }
+  if (state.fatalMessage) {
+    pdfWaiter.cancel();
+    throw new Error(state.fatalMessage);
+  }
+
+  const sourcePdfUrl = await pdfWaiter.promise;
+  await saveUrlToFile(sourcePdfUrl, outputPath);
+  const stats = await fs.promises.stat(outputPath);
+
+  return {
+    seq,
+    status: 'downloaded',
+    id: item.id,
+    title: item.title,
+    detailUrl,
+    sourcePdfUrl,
+    outputPath,
+    bytes: stats.size,
+    pages: primaryCandidate.pages || null,
+    resourceType: item.resourceType || '',
+  };
+}
+
+async function downloadOneBook(args) {
+  const resourceType = String(args.item.resourceType || '').toLowerCase();
+  if (resourceType === 'thematic_course') {
+    return downloadThematicCourseBook(args);
+  }
+  return downloadAssetsDocumentBook(args);
+}
+
 function getManifestPath(outputDir) {
   return path.join(outputDir, 'manifest.json');
 }
@@ -650,7 +859,7 @@ async function loadManifest(outputDir) {
 }
 
 function createResumeEntry({ previousEntry, item, seq, outputDir }) {
-  const detailUrl = buildDetailUrl(item.id);
+  const detailUrl = buildDetailUrl(item.id, item.contentType);
   const outputPath = path.join(outputDir, buildOutputFilename(item, seq));
   const result = {
     ...previousEntry,
@@ -703,18 +912,18 @@ function createManifestStore({ outputDir, items, previousEntries }) {
 
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
+    const seq = item.seq || index + 1;
     const previousEntry = previousEntryMap.get(item.id);
     if (!previousEntry) {
       continue;
     }
     manifest[index] = {
       ...previousEntry,
-      seq: index + 1,
+      seq,
       id: item.id,
       title: item.title,
-      detailUrl: buildDetailUrl(item.id),
-      outputPath:
-        previousEntry.outputPath || path.join(outputDir, buildOutputFilename(item, index + 1)),
+      detailUrl: buildDetailUrl(item.id, item.contentType),
+      outputPath: previousEntry.outputPath || path.join(outputDir, buildOutputFilename(item, seq)),
     };
   }
 
@@ -786,7 +995,7 @@ async function downloadWithWorkers({ context, items, options, prompt, manifestSt
         const resumeEntry = shouldResumeItem({
           previousEntry: manifestStore.get(itemIndex),
           item,
-          seq: itemIndex + 1,
+          seq: item.seq || itemIndex + 1,
           outputDir: options.outputDir,
           options,
         });
@@ -805,7 +1014,7 @@ async function downloadWithWorkers({ context, items, options, prompt, manifestSt
           const result = await downloadOneBook({
             page,
             item,
-            seq: itemIndex + 1,
+            seq: item.seq || itemIndex + 1,
             outputDir: options.outputDir,
             force: options.force,
             ensureLoggedIn,
@@ -814,11 +1023,11 @@ async function downloadWithWorkers({ context, items, options, prompt, manifestSt
           console.log(`[${workerLabel}] Saved: ${result.outputPath}`);
         } catch (error) {
           const failure = {
-            seq: itemIndex + 1,
+            seq: item.seq || itemIndex + 1,
             status: 'failed',
             id: item.id,
             title: item.title,
-            detailUrl: buildDetailUrl(item.id),
+            detailUrl: buildDetailUrl(item.id, item.contentType),
             error: error.message,
           };
           await manifestStore.set(itemIndex, failure);
@@ -836,6 +1045,21 @@ async function saveManifest(outputDir, manifest) {
   const manifestPath = getManifestPath(outputDir);
   await fs.promises.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   return manifestPath;
+}
+
+function buildUnsupportedManifestEntry(item, seq) {
+  const support = classifyItemSupport(item);
+  return {
+    seq,
+    status: 'unsupported',
+    id: item.id,
+    title: item.title,
+    detailUrl: buildDetailUrl(item.id, item.contentType),
+    resourceType: item.resourceType || '',
+    originType: item.originType || '',
+    reason: support.reason,
+    error: support.message,
+  };
 }
 
 async function launchBrowserContext(chromium, options) {
@@ -886,6 +1110,20 @@ async function main() {
 
   const items = await collectMatchedItems(options);
   const limitedItems = options.limit > 0 ? items.slice(0, options.limit) : items;
+  const supportedItems = [];
+  const unsupportedItems = [];
+  for (let index = 0; index < limitedItems.length; index += 1) {
+    const item = limitedItems[index];
+    const support = classifyItemSupport(item);
+    if (support.supported) {
+      supportedItems.push({
+        ...item,
+        seq: index + 1,
+      });
+    } else {
+      unsupportedItems.push(buildUnsupportedManifestEntry(item, index + 1));
+    }
+  }
   const previousManifest = options.resume && !options.force ? await loadManifest(options.outputDir) : [];
 
   if (limitedItems.length === 0) {
@@ -896,6 +1134,14 @@ async function main() {
   limitedItems.forEach((item, index) => {
     console.log(`${String(index + 1).padStart(2, '0')}. ${item.title}`);
   });
+  if (unsupportedItems.length > 0) {
+    console.log(`Unsupported items: ${unsupportedItems.length}`);
+    unsupportedItems.forEach((item) => {
+      console.warn(
+        `[skip unsupported] ${String(item.seq).padStart(2, '0')}. ${item.title} (${item.resourceType || item.originType || 'unknown'})`,
+      );
+    });
+  }
   if (options.resume && !options.force && previousManifest.length > 0) {
     console.log(`Resume checkpoint found: ${previousManifest.length} entries`);
   }
@@ -910,25 +1156,31 @@ async function main() {
   }
   const prompt = createPrompt();
   activePrompt = prompt;
+  const shouldLaunchBrowser = supportedItems.length > 0;
 
-  const context = await launchBrowserContext(chromium, options);
-  activeContext = context;
-  let manifest = [];
+  let manifest = [...unsupportedItems];
   const manifestStore = createManifestStore({
     outputDir: options.outputDir,
-    items: limitedItems,
+    items: supportedItems,
     previousEntries: previousManifest,
   });
+  let context = null;
 
   try {
-    console.log(`Concurrency: ${Math.min(options.concurrency, limitedItems.length)}`);
-    manifest = await downloadWithWorkers({
-      context,
-      items: limitedItems,
-      options,
-      prompt,
-      manifestStore,
-    });
+    let downloadedManifest = [];
+    if (shouldLaunchBrowser) {
+      context = await launchBrowserContext(chromium, options);
+      activeContext = context;
+      console.log(`Concurrency: ${Math.min(options.concurrency, supportedItems.length)}`);
+      downloadedManifest = await downloadWithWorkers({
+        context,
+        items: supportedItems,
+        options,
+        prompt,
+        manifestStore,
+      });
+    }
+    manifest = [...unsupportedItems, ...downloadedManifest].sort((left, right) => (left.seq || 0) - (right.seq || 0));
   } finally {
     closePrompt(prompt);
     activePrompt = null;
@@ -941,11 +1193,13 @@ async function main() {
   const downloadedCount = manifest.filter((item) => item.status === 'downloaded').length;
   const skippedCount = manifest.filter((item) => item.status === 'skipped').length;
   const failedCount = manifest.filter((item) => item.status === 'failed').length;
+  const unsupportedCount = manifest.filter((item) => item.status === 'unsupported').length;
 
   console.log('\nDone');
   console.log(`Downloaded: ${downloadedCount}`);
   console.log(`Skipped: ${skippedCount}`);
   console.log(`Failed: ${failedCount}`);
+  console.log(`Unsupported: ${unsupportedCount}`);
   console.log(`Manifest: ${manifestPath}`);
 }
 
