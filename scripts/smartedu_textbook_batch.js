@@ -6,11 +6,16 @@ const readline = require('readline');
 
 const DATA_VERSION_URL =
   'https://s-file-1.ykt.cbern.com.cn/zxx/ndrs/resources/tch_material/version/data_version.json';
+const PROJECT_ROOT = path.resolve(__dirname, '..');
 const DEFAULT_PROFILE_DIR = '.smartedu-profile';
 
 let activePrompt = null;
 let activeContext = null;
 let shutdownPromise = null;
+
+function resolveProjectPath(...segments) {
+  return path.resolve(PROJECT_ROOT, ...segments);
+}
 
 function normalizeCliUrl(value) {
   return String(value || '')
@@ -23,7 +28,7 @@ function parseArgs(argv) {
     url: '',
     allElectronic: false,
     outputDir: '',
-    userDataDir: path.resolve(DEFAULT_PROFILE_DIR),
+    userDataDir: resolveProjectPath(DEFAULT_PROFILE_DIR),
     headless: false,
     force: false,
     limit: 0,
@@ -42,7 +47,9 @@ function parseArgs(argv) {
       options.outputDir = argv[index + 1] || '';
       index += 1;
     } else if (arg === '--user-data-dir') {
-      options.userDataDir = path.resolve(argv[index + 1] || DEFAULT_PROFILE_DIR);
+      options.userDataDir = argv[index + 1]
+        ? path.resolve(argv[index + 1])
+        : resolveProjectPath(DEFAULT_PROFILE_DIR);
       index += 1;
     } else if (arg === '--headless') {
       options.headless = true;
@@ -112,9 +119,9 @@ function parseArgs(argv) {
       const parsedUrl = new URL(options.url);
       const defaultTag = parsedUrl.searchParams.get('defaultTag') || 'smartedu';
       const safeTag = defaultTag.replace(/[^\w.-]+/g, '_');
-      options.outputDir = path.resolve('downloads', `smartedu_${safeTag}`);
+      options.outputDir = resolveProjectPath('downloads', `smartedu_${safeTag}`);
     } else if (options.allElectronic) {
-      options.outputDir = path.resolve('downloads', 'smartedu_all_electronic');
+      options.outputDir = resolveProjectPath('downloads', 'smartedu_all_electronic');
     }
   } else {
     options.outputDir = path.resolve(options.outputDir);
@@ -366,13 +373,29 @@ async function collectMatchedItems(options) {
 async function waitForPdfFrame(page, timeoutMs) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const frame = page.frames().find((entry) => entry.url().includes('/pdfjs/2.15/web/viewer.html'));
+    const frame = page.frames().find((entry) => isPdfViewerFrameUrl(entry.url()));
     if (frame) {
       return frame;
     }
     await page.waitForTimeout(1000);
   }
   return null;
+}
+
+function isPdfViewerFrameUrl(frameUrl) {
+  if (!frameUrl) {
+    return false;
+  }
+
+  try {
+    const parsedUrl = new URL(frameUrl);
+    return (
+      parsedUrl.pathname.endsWith('/viewer.html') &&
+      (parsedUrl.searchParams.has('file') || parsedUrl.hash.includes('file='))
+    );
+  } catch (error) {
+    return false;
+  }
 }
 
 async function waitForPdfReady(frame, page, timeoutMs) {
